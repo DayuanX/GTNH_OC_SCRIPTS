@@ -2,6 +2,8 @@ local component = require("component")
 local config = require("config")
 local filesystem = require("filesystem")
 local event = require("event")
+local os = require("os")
+local serialization = require("serialization")
 local utility = {}
 local transposer = component.transposer
 local modem = nil
@@ -127,7 +129,7 @@ end
 
 --Converts a princess to the given bee type
 --Assumes bee is scanned (Only scanned bees expose genes)
-function utility.convertPrincess(beeName, sideConfig, droneReq)
+function utility.convertPrincess(beeName, sideConfig, droneReq, breeder, acclimatiserConfig)
     print("Converting princess to " .. beeName)
     local droneSlot = nil
     local targetGenes = nil
@@ -214,6 +216,8 @@ function utility.convertPrincess(beeName, sideConfig, droneReq)
                     end
                 end
             end
+        elseif acclimatiserConfig.useAcclimatiser and breeder ~= nil then
+            utility.adjustToleranceIfNeeded(breeder, sideConfig, acclimatiserConfig)
         end
         os.sleep(1)
     end
@@ -505,6 +509,169 @@ function utility.breed(beeName, breedData, sideConfig, robotMode)
     ::skip::
 end
 
+---breed with mutatron and imprinter
+---@param beeName string bee name.
+---@param breedData table breedData object.
+---@param sideConfig table config object.
+---@param breeder table breeder object.
+---@param acclimatiserConfig table acclimatiserConfig object.
+---@return boolean success true if breeding succeeded or aborted, false means we need a retry
+function utility.breedByMutatron(beeName, breedData, sideConfig, breeder, acclimatiserConfig)
+    assert(breeder ~= nil, "breeder should not be nil.")
+    print("Breeding " .. beeName .. " bee by Mutatron.")
+    local basePrincessSlot, baseDroneSlot = utility.findPair(breedData, sideConfig)
+    if basePrincessSlot == -1 or baseDroneSlot == -1 then
+        print("Couldn't find the parents of " .. beeName .. " bee! Aborting.")
+        return true
+    end
+
+    if utility.isBeeSpeciesBlacklistedInMutatron(beeName) then
+        print("This bee is blacklisted in the Mutatron!")
+        print("type \"skip\" to skip this breed (You made this bee somewhere else).")
+        local ans = io.read()
+        while type(ans) ~= "string" or ans ~= "skip" do
+            print("type \"skip\" to skip this breed (You made this bee somewhere else).")
+            ans = io.read()
+        end
+        print("Updating the bee list...")
+        utility.listBeesInStorage(sideConfig)
+
+        return true
+    end
+
+    safeTransfer(sideConfig.storage,sideConfig.scanner, 1, basePrincessSlot, "storage", "mutatron", config.slot.scanner.Mutatron, true)
+    safeTransfer(sideConfig.storage,sideConfig.scanner, 1, baseDroneSlot, "storage", "mutatron", config.slot.scanner.Mutatron, true)
+    -- princess and drone transferred to mutatron
+
+    -- wait until mutatron done, transfer queen to breeder
+    while transposer.getStackInSlot(sideConfig.output, 1) == nil do
+        os.sleep(1)
+    end
+    if transposer.getStackInSlot(sideConfig.output, 1).name == "gendustry:Waste" then
+        print("Mutatron failed! Princess and drone killed by mutatron. We may have a retry.")
+        safeTransfer(sideConfig.output, sideConfig.garbage, 64, 1, "output", "garbage")
+        return false
+    end
+    -- successfuly mutated
+    -- still need to check if the bee's gene is dangerous, force to imprint it if so
+    -- queen in output#1
+    local killed = utility.forceImprintIfNeeded(sideConfig.output, 1, sideConfig)
+    if killed then
+        print("Queen killed by imprinter! We may have a retry.")
+        return false
+    end
+
+    -- mutation work done, move queen to breeder
+    safeTransfer(sideConfig.output, sideConfig.breeder, 64, 1, "output", "breeder")
+
+
+    local isPure = false
+    local isGeneticallyPerfect = false --In this case genetic perfection refers to the bee having the same active and inactive genes
+
+    local princessPureness = 0
+    local princessSlot = nil
+    local bestDronePureness = -1
+    local bestDroneSlot = nil
+    local scanCount = 0
+
+    while(not isPure) or (not isGeneticallyPerfect) do
+        if IsBeeCycleStarted(sideConfig) and acclimatiserConfig.useAcclimatiser then
+            utility.adjustToleranceIfNeeded(breeder, sideConfig, acclimatiserConfig)
+        end
+        while(not cycleIsDone(sideConfig)) do
+            os.sleep(1)
+        end
+        print("Scanning bees...")
+        scanCount = utility.dumpBreeder(sideConfig, true)
+        if scanCount == 0 then
+            print("HEY! YOU TOOK OUT THE BEE! PUT A PRINCESS + DRONE IN THE BREEDER!")
+            while(not cycleIsDone(sideConfig)) do
+                os.sleep(1)
+            end
+            print("Continuing...")
+            goto continueMutatron
+        end
+        while(transposer.getStackInSlot(sideConfig.output, scanCount) == nil) do
+            os.sleep(1)
+        end
+
+        print("Assessing...")
+        princessPureness = 0
+        princessSlot = nil
+        bestDronePureness = -1
+        bestDroneSlot = nil
+        for i=1,scanCount do
+            local item = transposer.getStackInSlot(sideConfig.output, i) --Previous loop ensures the slots aren't empty
+            local _,type = utility.getItemName(item)
+            if type == "Princess" then
+                princessSlot = i
+                if item.individual.active.species.name == beeName then
+                    princessPureness = princessPureness + 1
+                end
+                if item.individual.inactive.species.name == beeName then
+                    princessPureness = princessPureness + 1
+                end
+            else
+                local dronePureness = 0
+                if item.individual.active.species.name == beeName then
+                    dronePureness = dronePureness + 1
+                end
+                if item.individual.inactive.species.name == beeName then
+                    dronePureness = dronePureness + 1
+                end
+                if dronePureness > bestDronePureness then
+                    bestDronePureness = dronePureness
+                    bestDroneSlot = i
+                end
+            end
+        end
+
+        assert(bestDroneSlot ~= nil, "With mutatron we should not get impure bees, something went wrong")
+        assert(princessSlot ~= nil, "With mutatron we should not get impure bees, something went wrong")
+
+        -- princess may still have dangerous genes, check it
+        killed = utility.forceImprintIfNeeded(sideConfig.output, princessSlot, sideConfig)
+        if killed then
+            print("Princess killed by imprinter! We may have a retry.")
+            for i=1,scanCount do
+                safeTransfer(sideConfig.output,sideConfig.garbage, 64, i, "output", "garbage") --Move all bees to garbage
+            end
+            return false
+        end
+
+        -- get a pure drone, imprint it
+        safeTransfer(sideConfig.output, sideConfig.scanner, 64, bestDroneSlot, "output", "imprinter", config.slot.scanner.Imprinter)
+        bestDroneSlot = config.slot.output.imprinted
+        -- we always output imprinted drones to this slot to prevent some stacking issues
+        while transposer.getStackInSlot(sideConfig.output, bestDroneSlot) == nil do
+            os.sleep(1)
+        end
+
+        if (princessPureness + bestDronePureness) == 4 then
+            print("Target bee is pure!")
+            isPure = true
+            isGeneticallyPerfect = utility.ensureGeneticEquivalence(princessSlot, bestDroneSlot, sideConfig) --Makes sure all genes are equal. will move genetically equivalent bee to storage
+            if not isGeneticallyPerfect then
+                print("Target bee is not genetically consistent! continuing")
+                safeTransfer(sideConfig.output, sideConfig.breeder, 1, princessSlot, "output", "breeder") --Send princess to breeding slot
+                safeTransfer(sideConfig.output, sideConfig.breeder, 1, bestDroneSlot, "output", "breeder") --Send drone to breeding slot
+                dumpOutput(sideConfig, scanCount, bestDroneSlot)
+            end
+        else
+            assert(false, "With mutatron we should not get impure bees, something went wrong")
+        end
+        ::continueMutatron::
+    end
+    for i=1,scanCount do
+        if i ~= bestDroneSlot and i ~= princessSlot then
+            safeTransfer(sideConfig.output,sideConfig.garbage, 64, i, "output", "garbage") --Move irrelevant drones to garbage
+        end
+    end
+    print("Breeding finished. " .. beeName .. " princess and its drones moved to storage.")
+
+    return true
+end
+
 function utility.ensureGeneticEquivalence(princessSlot, droneSlot, sideConfig)
     local princess = transposer.getStackInSlot(sideConfig.output,princessSlot)
     local drone = transposer.getStackInSlot(sideConfig.output,droneSlot)
@@ -770,9 +937,12 @@ function continueImprinting(sideConfig, princessSlot, droneSlot, scanCount)
     dumpOutput(sideConfig, scanCount)
 end
 
-function dumpOutput(sideConfig, scanCount)
+function dumpOutput(sideConfig, scanCount, additionalSlot)
     for i=1,scanCount do
         safeTransfer(sideConfig.output, sideConfig.garbage, 64, i, "output", "garbage")
+    end
+    if additionalSlot then
+        safeTransfer(sideConfig.output, sideConfig.garbage, 64, additionalSlot, "output", "garbage")
     end
 end
 function utility.hasTargetGenes(princess, drone, targetGenes)
@@ -990,23 +1160,30 @@ function utility.findPairString(bee1, bee2, sideConfig)
     return table.unpack({-1,-1})
 end
 
+---get bee name and type from ItemStack; returns (nil, nil) if the item is not a bee
+---@param bee ItemStack the bee
+---@return string|nil species, string|nil type type could be "Princess", "Drone", or "Queen"
 function utility.getItemName(bee)
-    local name = ""
-    if bee.label ~= nil then
-        name = bee.label
-    else
-        name = bee.displayName
+--TODO: 
+    -- it is better to return bee uid, but this breaks info display
+
+    -- not a bee
+    if bee == nil or bee.individual == nil then
+        return nil, nil
     end
-    local words = {}
-    for word in string.gmatch(name,"%S+") do
-        table.insert(words,word)
+
+    local species = bee.individual.displayName
+
+    local type = nil
+    if bee.name == "Forestry:beeQueenGE" then
+        type = "Queen"
+    elseif bee.name == "Forestry:beePrincessGE" then
+        type = "Princess"
+    elseif bee.name == "Forestry:beeDroneGE" then
+        type = "Drone"
     end
-    local species = words[1]
-    for i=2,(#words-1) do
-        species = species .. " " .. words[i]
-    end
-    local type = words[#words]
-    return table.unpack({species,type})
+
+    return species, type
 end
 
 function utility.checkPrincess(sideConfig)
@@ -1043,7 +1220,7 @@ function utility.areGenesEqual(geneTable)
 end
 
 
-function utility.getOrCreateConfig()
+function utility.getOrCreateSideConfig()
     if filesystem.exists("/home/sideConfig.lua") then
         local sideConfig = require("sideConfig")
         return sideConfig
@@ -1086,6 +1263,42 @@ function utility.getOrCreateConfig()
             end
         end
     end
+
+    remainingDirections = {"down","up","north","south","west","east"}
+    configOrder = {"apiaryBreaker","acclimatiserBreaker"}
+    print("Let's set up the redstone I/O! If you don't need it, configure it randomly.")
+    print("All directions are relative to the redstone I/O.")
+    for _,container in pairs(configOrder) do
+        print(string.format("Which side is the: %s? Select one of the following:", container))
+        for i,direction in pairs(directions) do
+            if indexInTable(remainingDirections, direction) ~= 0 then
+                print(string.format("%d. %s", i, direction))
+            end
+        end
+        local answeredCorrectly = false
+        while not answeredCorrectly do
+            local answer = io.read("*n")
+            if tonumber(answer) ~= nil then
+                answer = tonumber(answer)
+                if answer >= 1 and answer <= #directions then --Check if answer within bounds
+                    newConfig[container] = answer - 1
+                    table.remove(remainingDirections, indexInTable(remainingDirections, directions[answer]))
+                    answeredCorrectly = true
+                end
+            else
+                local index = indexInTable(directions, string.lower(answer))
+                if index ~= 0 then
+                    newConfig[container] = index - 1
+                    table.remove(remainingDirections, indexInTable(remainingDirections, answer))
+                    answeredCorrectly = true
+                end
+            end
+            if not answeredCorrectly then
+                print("I can't process this answer! Try again.")
+            end
+        end
+    end
+
     print("Creating sideConfig.lua...")
     local file = filesystem.open("/home/sideConfig.lua", "w")
     file:write("local sideConfig = {\n")
@@ -1099,15 +1312,422 @@ function utility.getOrCreateConfig()
     return newConfig
 end
 
-function safeTransfer(sideIn, sideOut, amount, slot, sideInName, sideOutName)
-    if (transposer.transferItem(sideIn, sideOut, amount, slot) == 0 and transposer.getStackInSlot(sideIn, slot) ~= nil) then
-        print(string.format("TRANSFER FROM SLOT %d OF CONTAINER: %s TO CONTAINER: %s FAILED! PLEASE DO IT MANUALLY OR CLEAN THE %s CONTAINER!", slot, sideInName:upper(), sideOutName:upper(), sideOutName:upper()))
-        while(transposer.getStackInSlot(sideIn, slot) ~= nil) do
+function utility.getOrCreateAcclimatiserConfig()
+    if filesystem.exists("/home/acclimatiserConfig.lua") then
+        local acclimatiserConfig = require("acclimatiserConfig")
+        return acclimatiserConfig
+    end
+    local newConfig = {}
+
+    print("It looks like this might be your first time running this program. Let's set up your acclimatiser!")
+    print("Do you want to use acclimatiser to adjust humidity/temperature? (y/n)")
+    local getUseAcclimatiser = function ()
+        local answer = nil
+        while answer == nil do
+            answer = io.read("*l")
+            if string.lower(answer) ~= "y" and string.lower(answer) ~= "n" then
+                print("Invalid input. Please enter y or n.")
+                answer = nil
+            end
+        end
+        return string.lower(answer) == "y"
+    end
+
+    newConfig.useAcclimatiser = getUseAcclimatiser()
+
+    print("Check your apiary to get humidity/temperature info, and enter the number below.")
+    -- humidity
+    local function getHumidity()
+        local answer = nil
+        while answer == nil do
+            print("Please enter the apiary humidity:")
+            print("arid: -1")
+            print("normal: 0")
+            print("damp: 1")
+            answer = io.read("*n")
+            if answer < -1 or answer > 1 then
+                print("Invalid input.")
+                answer = nil
+            end
+        end
+        return answer
+    end
+    
+    local function getTemperature()
+        local answer = nil
+        while answer == nil do
+            print("Please enter the apiary temperature:")
+            print("icy: -2")
+            print("cold: -1")
+            print("none: 0")
+            print("normal: 0")
+            print("warm: 1")
+            print("hot: 2")
+            print("hellish: 3")
+            answer = io.read("*n")
+            if answer < -2 or answer > 3 then
+                print("Invalid input.")
+                answer = nil
+            end
+        end
+        return answer
+    end
+
+    local function getTimeout()
+        local answer = nil
+        while answer == nil do
+            print("Please enter the acclimatiser timeout in seconds:")
+            print("(Acclimatiser will be break to retrieve Queen bee back when timed out):")
+            answer = io.read("*n")
+            if answer < 0 then
+                print("Invalid input.")
+                answer = nil
+            end
+        end
+        return answer
+    end
+
+    newConfig.humidity = getHumidity()
+    newConfig.temperature = getTemperature()
+    newConfig.timeout = getTimeout()
+
+    print("Creating acclimatiserConfig.lua...")
+    local file = filesystem.open("/home/acclimatiserConfig.lua", "w")
+    file:write("local acclimatiserConfig = {\n")
+    file:write(string.format("[\"%s\"] = %s, \n", "useAcclimatiser", newConfig.useAcclimatiser))
+    file:write(string.format("[\"%s\"] = %d, \n", "temperature", newConfig.temperature))
+    file:write(string.format("[\"%s\"] = %d, \n", "humidity", newConfig.humidity))
+    file:write(string.format("[\"%s\"] = %d, \n", "timeout", newConfig.timeout))
+    file:write("}\n")
+    file:write("return acclimatiserConfig")
+    file:close()
+    print("Done! Setup Complete!")
+    return newConfig
+end
+function utility.isBeeSpeciesBlacklistedInMutatron(beeName)
+    local blacklist = {
+        ["Leporine"] = true,
+        ["Merry"] = true,
+        ["Tipsy"] = true,
+        ["Tricky"] = true,
+        ["Chad"] = true,
+        ["Cosmic Neutronium"] = true,
+        ["Infinity Catalyst"] = true,
+        ["Infinity"] = true,
+        ["Americium"] = true,
+        ["Europium"] = true,
+        ["Kevlar"] = true,
+        ["Drake"] = true
+    }
+
+    return blacklist[beeName] or false
+end
+
+--- Get the humidity and temperature range of the queen bee
+--- @param queen table The queen object
+--- @return table|nil humidityRange The humidity range, containing min and max fields
+--- @return table|nil temperatureRange The temperature range, containing min and max fields
+function utility.getQueenHumidityAndTemperatureRange(queen)
+    if not queen.individual then
+        return nil, nil
+    end
+    queen = queen.individual
+    if not queen or not queen.active then
+        return nil, nil
+    end
+
+    local function parseTolerance(tolerance)
+        local upValue = 0
+        local downValue = 0
+        if tolerance:find("UP") then
+            upValue = tonumber(tolerance:match("UP_(%d+)")) or 0
+        elseif tolerance:find("DOWN") then
+            downValue = tonumber(tolerance:match("DOWN_(%d+)")) or 0
+        elseif tolerance:find("BOTH") then
+            local bothValue = tonumber(tolerance:match("BOTH_(%d+)")) or 0
+            upValue = bothValue
+            downValue = bothValue
+        end
+        return upValue, downValue
+    end
+
+    local function parseTemperature(temperature)
+        local tempMap = {
+            ICY = -2,
+            COLD = -1,
+            NONE = 0,
+            NORMAL = 0,
+            WARM = 1,
+            HOT = 2,
+            HELLISH = 3
+        }
+        return tempMap[temperature:upper()] or 0
+    end
+
+    local function parseHumidity(humidity)
+        local humidityMap = {
+            ARID = -1,
+            NORMAL = 0,
+            DAMP = 1
+        }
+        return humidityMap[humidity:upper()] or 0
+    end
+
+    -- print(string.format("humidity: %s, temperature: %s", queen.active.species.humidity, queen.active.species.temperature))
+
+    local humidityUp, humidityDown = parseTolerance(queen.active.humidityTolerance)
+    local temperatureUp, temperatureDown = parseTolerance(queen.active.temperatureTolerance)
+    local baseHumidity = parseHumidity(queen.active.species.humidity)
+    local baseTemperature = parseTemperature(queen.active.species.temperature)
+
+    local humidityRange = {
+        min = baseHumidity - humidityDown,
+        max = baseHumidity + humidityUp
+    }
+
+    local temperatureRange = {
+        min = baseTemperature - temperatureDown,
+        max = baseTemperature + temperatureUp
+    }
+
+    return humidityRange, temperatureRange
+end
+
+--- Adjust the tolerance of the queen bee if needed. 
+---@param breeder any
+---@param sideConfig any
+---@param acclimatiserConfig any
+function utility.adjustToleranceIfNeeded(breeder, sideConfig, acclimatiserConfig)
+    -- wait until queen created
+    local queenStack = transposer.getStackInSlot(sideConfig.breeder, 1)
+    while queenStack ~= nil do
+        local name, type = utility.getItemName(queenStack)
+        if type == "Queen" then
+            break
+        end
+        os.sleep(1)
+    end
+
+    -- queenStack may be nil if the breeder's work is done
+
+    -- no need to adjust tolerance if the breeder can breed
+    if breeder.canBreed() or transposer.getStackInSlot(sideConfig.breeder, 1) == nil then
+        return
+    end
+
+    -- from here, queenStack must not be nil
+    -- and we may have to adjust tolerance
+    assert(queenStack ~= nil, "queenStack must not be nil")
+    print("Cannot breed. Adjusting tolerance...")
+
+    print(string.format("Breaking apiary to get the queen."))
+    component.redstone.setOutput(sideConfig.apiaryBreaker, 15)
+    os.sleep(config.blockBreakerRedstoneInterval)
+    component.redstone.setOutput(sideConfig.apiaryBreaker, 0)
+    os.sleep(config.blockBreakerRedstoneInterval)
+    while (transposer.getStackInSlot(sideConfig.output, 1) == nil) do
+        os.sleep(1)
+    end
+    -- after breaking, queen appears in the output slot 1
+    safeTransfer(sideConfig.output, sideConfig.scanner, 64, 1, "output", "ToBeAcc", config.slot.scanner.ToBeAcc)
+    while (transposer.getStackInSlot(sideConfig.scanner, config.slot.scanner.ToBeAcc) == nil) do
+        os.sleep(1)
+    end
+    -- queen transferred to scanner#21
+
+    local bee = transposer.getStackInSlot(sideConfig.scanner, config.slot.scanner.ToBeAcc)
+    if bee.individual ~= nil and bee.individual.active == nil then
+        print(string.format("Queen is unscanned! Sending to scanner."))
+        safeTransfer(sideConfig.scanner, sideConfig.scanner, 64, config.slot.scanner.ToBeAcc, "output", "scanner", 1)
+        while (transposer.getStackInSlot(sideConfig.output, 1) == nil) do
             os.sleep(1)
-            transposer.transferItem(sideIn, sideOut, amount, slot)
+        end
+        safeTransfer(sideConfig.output, sideConfig.scanner, 64, 1, "output", "ToBeAcc", config.slot.scanner.ToBeAcc)
+    end
+    bee = transposer.getStackInSlot(sideConfig.scanner, config.slot.scanner.ToBeAcc)
+
+    local temperatureOK = false
+    local humidityOK = false
+    local humidityRange, temperatureRange = nil, nil
+    local elaspedSeconds = 0
+    local acclimatiserTimeout = acclimatiserConfig.timeout
+    local sideAcclimatiserBreaker = sideConfig.acclimatiserBreaker
+
+    while not (temperatureOK and humidityOK) do
+        -- temperature
+        while (transposer.getStackInSlot(sideConfig.scanner, config.slot.scanner.ToBeAcc) == nil) do
+            os.sleep(1)
+        end
+
+        bee = transposer.getStackInSlot(sideConfig.scanner, config.slot.scanner.ToBeAcc)
+        humidityRange, temperatureRange = utility.getQueenHumidityAndTemperatureRange(bee)
+        assert(humidityRange ~= nil, "humidityRange must not be nil")
+        assert(temperatureRange ~= nil, "temperatureRange must not be nil")
+        if temperatureRange.max < acclimatiserConfig.temperature or acclimatiserConfig.temperature < temperatureRange.min then
+            print("adjusting temperature tolerance.")
+            safeTransfer(sideConfig.scanner, sideConfig.scanner, 64, config.slot.scanner.ToBeAcc, "scanner", "T+-Acc", config.slot.scanner.TempAcc)
+            elaspedSeconds = 0
+            while (transposer.getStackInSlot(sideConfig.output, 1) == nil and elaspedSeconds < acclimatiserTimeout) do
+                os.sleep(1)
+                elaspedSeconds = elaspedSeconds + 1
+            end
+            if elaspedSeconds >= acclimatiserTimeout then
+                print("Timeout while waiting for acclimatiser, break it.")
+                component.redstone.setOutput(sideAcclimatiserBreaker, 15)
+                os.sleep(config.blockBreakerRedstoneInterval)
+                component.redstone.setOutput(sideAcclimatiserBreaker, 0)
+                os.sleep(config.blockBreakerRedstoneInterval)
+            end
+            safeTransfer(sideConfig.output, sideConfig.scanner, 64, 1, "output", "ToBeAcc", config.slot.scanner.ToBeAcc)
+        else
+            temperatureOK = true
+        end
+
+        -- humidity
+        while (transposer.getStackInSlot(sideConfig.scanner, config.slot.scanner.ToBeAcc) == nil) do
+            os.sleep(1)
+        end
+        bee = transposer.getStackInSlot(sideConfig.scanner, config.slot.scanner.ToBeAcc)
+        humidityRange, temperatureRange = utility.getQueenHumidityAndTemperatureRange(bee)
+        assert(humidityRange ~= nil, "humidityRange must not be nil")
+        assert(temperatureRange ~= nil, "temperatureRange must not be nil")
+        if humidityRange.max < acclimatiserConfig.humidity or acclimatiserConfig.humidity < humidityRange.min then
+            print("adjusting humidity tolerance.")
+            safeTransfer(sideConfig.scanner, sideConfig.scanner, 64, config.slot.scanner.ToBeAcc, "scanner", "H+-Acc", config.slot.scanner.HumAcc)
+            elaspedSeconds = 0
+            while (transposer.getStackInSlot(sideConfig.output, 1) == nil) and elaspedSeconds < acclimatiserTimeout do
+                os.sleep(1)
+                elaspedSeconds = elaspedSeconds + 1
+            end
+            if elaspedSeconds >= acclimatiserTimeout then
+                print("Timeout while waiting for acclimatiser, break it.")
+                component.redstone.setOutput(sideAcclimatiserBreaker, 15)
+                os.sleep(config.blockBreakerRedstoneInterval)
+                component.redstone.setOutput(sideAcclimatiserBreaker, 0)
+                os.sleep(config.blockBreakerRedstoneInterval)
+            end
+            safeTransfer(sideConfig.output, sideConfig.scanner, 64, 1, "output", "ToBeAcc", config.slot.scanner.ToBeAcc)
+        else
+            humidityOK = true
+        end
+    end
+
+    -- finally we put the queen back to the breeder
+    print("Adjusted queen moved to breeder.")
+    safeTransfer(sideConfig.scanner, sideConfig.breeder, 1, config.slot.scanner.ToBeAcc, "scanner", "breeder")
+
+    if (not breeder.canBreed()) and transposer.getStackInSlot(sideConfig.breeder, 1) ~= nil then
+        print("Warning: Queen exists but cannot breed, even after tolerance adjustment. Please check the queen bee.")
+    end
+
+end
+
+---check if we should imprint the bee immediately.
+---assumes bee in the side#slot. if success, the bee will still be in side#slot. otherwise waste in garbage.
+---@param containerSide integer container side
+---@param containerSlot integer slot number
+---@param sideConfig table sideConfig object
+---@return boolean killed true if the bee killed by imprinter
+function utility.forceImprintIfNeeded(containerSide, containerSlot, sideConfig)
+    safeTransfer(containerSide, sideConfig.scanner, 64, containerSlot, "output", "cache", config.slot.scanner.cache)
+    while (transposer.getStackInSlot(sideConfig.scanner, config.slot.scanner.cache) == nil) do
+        os.sleep(1)
+    end
+    local bee = transposer.getStackInSlot(sideConfig.scanner, config.slot.scanner.cache)
+
+    if bee.individual ~= nil and bee.individual.active == nil then
+        print(string.format("Bee is unscanned! Sending to scanner."))
+        safeTransfer(sideConfig.scanner, sideConfig.scanner, 64, config.slot.scanner.cache, "cache", "scanner", 1)
+        while (transposer.getStackInSlot(sideConfig.output, 1) == nil) do
+            os.sleep(1)
+        end
+        safeTransfer(sideConfig.output, sideConfig.scanner, 64, 1, "output", "cache", config.slot.scanner.cache)
+    end
+    bee = transposer.getStackInSlot(sideConfig.scanner, config.slot.scanner.cache)
+
+    local shouldImprint = utility.hasForcedImprintGenes(bee)
+    -- no need to imprint
+    if not shouldImprint then
+        safeTransfer(sideConfig.scanner, containerSide, 1, config.slot.scanner.cache, "scanner", "output", containerSlot)
+        return false
+    end
+
+    print("Detected forced imprint genes. Imprint the bee now...")
+
+    print(string.format("Sending bee to imprinter."))
+    safeTransfer(sideConfig.scanner, sideConfig.scanner, 64, config.slot.scanner.cache, "cache", "imprinter", config.slot.scanner.Imprinter)
+    while (transposer.getStackInSlot(sideConfig.output, config.slot.output.imprinted) == nil) do
+        os.sleep(1)
+    end
+    -- imprinted bee/waste in output#imprinted
+
+    bee = transposer.getStackInSlot(sideConfig.output, config.slot.output.imprinted)
+    if bee.name == "gendustry:Waste" then
+        print("Imprinter killed the bee.")
+        -- move waste to garbage
+        safeTransfer(sideConfig.output, sideConfig.garbage, 64, config.slot.output.imprinted, "output", "garbage")
+        return true
+    end
+    
+    -- bee still alive, move it back to initial place
+    safeTransfer(sideConfig.output, containerSide, 1, config.slot.output.imprinted, "output", "output", containerSlot)
+    return false
+end
+
+--- Check if the bee has some genes that should be erased/imprinted forcibly
+---@param bee table bee itemstack
+---@return boolean hasForcedImprintGenes true if the bee has some genes that should be erased/imprinted forcibly
+function utility.hasForcedImprintGenes(bee)
+    if not bee or not bee.individual or not bee.individual.active then
+        return false
+    end
+
+    for geneName, forcedMap in pairs(config.forceImprintGenes) do
+        local currentVal
+        -- species need special treatment
+        if geneName == "species" then
+            currentVal = (bee.individual.active.species or {}).uid
+        else
+            currentVal = bee.individual.active[geneName]
+        end
+
+        if currentVal and forcedMap[currentVal] then
+            return true
+        end
+
+        currentVal = bee.individual.inactive[geneName]
+        if currentVal and forcedMap[currentVal] then
+            return true
+        end
+    end
+
+    return false
+end
+
+function safeTransfer(sideIn, sideOut, amount, slot, sideInName, sideOutName, slotOut, noWarn)
+    noWarn = noWarn or false
+    local transferSuccess
+    if slotOut then
+        transferSuccess = transposer.transferItem(sideIn, sideOut, amount, slot, slotOut)
+    else
+        transferSuccess = transposer.transferItem(sideIn, sideOut, amount, slot)
+    end
+
+    if transferSuccess == 0 and transposer.getStackInSlot(sideIn, slot) ~= nil then
+        if not noWarn then
+            print(string.format("TRANSFER FROM SLOT %d OF CONTAINER: %s TO CONTAINER: %s FAILED! PLEASE DO IT MANUALLY OR CLEAN THE %s CONTAINER!", slot, sideInName:upper(), sideOutName:upper(), sideOutName:upper()))
+        end
+        while transposer.getStackInSlot(sideIn, slot) ~= nil do
+            os.sleep(1)
+            if slotOut then
+                transposer.transferItem(sideIn, sideOut, amount, slot, slotOut)
+            else
+                transposer.transferItem(sideIn, sideOut, amount, slot)
+            end
         end
     end
 end
+
 function indexInTable(tbl, target)
     for i,value in pairs(tbl) do
         if value == target then
@@ -1129,5 +1749,17 @@ function cycleIsDone(sideConfig)
     end 
     return false
 end
-return utility
 
+function IsBeeCycleStarted(sideConfig)
+    local item = transposer.getStackInSlot(sideConfig.breeder, 1)
+    if item ~= nil then
+        local _,type = utility.getItemName(item)
+        if type == "Queen" then
+            return true
+        end
+    end
+
+    return false
+end
+
+return utility

@@ -69,4 +69,43 @@ config.convertDroneReq = 16
 
 config.port = 3001
 config.robotPort = 3000
+
+-- 1-indexed slots config
+-- Assumes we use a 27-slot ender chest
+-- we extends the "scanner" chest to process everything, each slot for a different purpose
+config.slot = {
+    ["scanner"] = {
+        -- slot 1-5 for old scanner
+        ["TempAcc"] = 26, -- TemperatureAcclimatiser,
+        ["HumAcc"] = 24, -- HumidityAcclimatiser,
+        ["Imprinter"] = 23,
+        ["Mutatron"] = 22,
+        ["ToBeAcc"] = 21, -- bees that need to be acclimatised
+        ["cache"] = 20, -- cache random stuff
+    },
+    ["output"] = {
+        -- slot 1 the first output slot, for general-purpose usage
+        ["imprinted"] = 27, -- imprinted bees
+    }
+}
+
+-- time between block breaker redstone high->low
+config.blockBreakerRedstoneInterval = 0.2
+
+-- With mutatron and imprinter, when we get a bee that has a gene in this list, 
+-- we immediately send it to the imprinter
+config.forceImprintGenes = {
+    -- species = { -- do not use this, it will kill all the princesses
+    --     ["gregtech.bee.speciesEnergy"] = true, -- for testing
+    -- },
+    effect = {
+        ["extrabees.effect.lightning"] = true,
+        ["extrabees.effect.meteor"] = true,
+        ["forestry.allele.effect.radioactive"] = true,
+    },
+    -- flowerProvider = {
+    --     ["flowersEnd"] = true, -- Dragon Egg
+    -- },
+}
+
 return config

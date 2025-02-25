@@ -15,6 +15,7 @@ function printUsage()
     print("Supported flags:")
     print("--noFinalImprint || If used in breed mode the final bee won't have its genes imprinted (in case you want a gene from this bee)")
     print("--swarm || If used in convert mode the conversion will happen to every princess.")
+    print("--mutatron || If used in breed mode the breeding will utilize mutatron and imprinter. (Setup is complex, refer to the tutorial)")
 end
 if programMode == nil then
     print("PROGRAM MODE NOT PROVIDED! TERMINATING!")
@@ -34,7 +35,8 @@ if next(component.list("modem")) ~= nil then
     modem = component.modem
 end
 local robotMode = false
-local sideConfig = util.getOrCreateConfig()
+local sideConfig = util.getOrCreateSideConfig()
+local acclimatiserConfig = util.getOrCreateAcclimatiserConfig()
 
 if (next(component.list("for_alveary_0")) ~= nil) then
     print("Alveary found!")
@@ -58,6 +60,18 @@ end
 if flags["noFinalImprint"] == true then
     print("------------------------------")
     print(string.format("The program will skip imprinting of the %s bee", targetBee))
+    print("------------------------------")
+end
+
+if flags["mutatron"] == true then
+    if (next(component.list("tile_for_apiculture_0_name")) == nil) then
+        print("------------------------------")
+        print("Mutatron mode is exclusive to apiary! Terminating.")
+        print("------------------------------")
+        os.exit()
+    end
+    print("------------------------------")
+    print("The program will use the mutatron for breeding.")
     print("------------------------------")
 end
 
@@ -130,6 +144,7 @@ if programMode:lower() == "breed" then
                 if beeCount[parent1] == nil or beeCount[parent2] == nil then
                     print("Cannot breed " .. beeName .. ". Skipping.")
                 elseif beeCount[parent1].Drone ~= nil and beeCount[parent2].Drone ~= nil then
+                    ::retryMutation::
                     if beeCount[parent1].Princess then
                         if beeCount[parent1].Drone < 32 then
                             util.populateBee(parent1, sideConfig, 16)
@@ -139,12 +154,21 @@ if programMode:lower() == "breed" then
                             util.populateBee(parent2, sideConfig, 16)
                         end
                     else
-                        util.convertPrincess(parent1, sideConfig)
-                        if beeCount[parent1].Drone < 32 then
-                            util.populateBee(parent1, sideConfig, 16)
-                        end
+                            util.convertPrincess(parent1, sideConfig, nil, breeder, acclimatiserConfig)
+                            if beeCount[parent1].Drone < 32 then
+                                util.populateBee(parent1, sideConfig, 16)
+                            end
                     end
-                    util.breed(beeName, breedData, sideConfig, robotMode)
+                    if flags["mutatron"] == true then
+                        local success = util.breedByMutatron(beeName, breedData, sideConfig, breeder, acclimatiserConfig)
+                        if not success then
+                            print("Failed to breed " .. beeName .. " with the mutatron! Retrying...")
+                            beeCount = util.listBeesInStorage(sideConfig) -- princess & drone killed, refresh beeCount
+                            goto retryMutation
+                        end
+                    else
+                        util.breed(beeName, breedData, sideConfig, robotMode)
+                    end
                     if flags["completionist"] == true then
                         print("Your " .. beeName .. " bee is ready! Complete your quest, put the bee back then type ok to proceed!")
                             local ans = io.read()
@@ -249,10 +273,10 @@ elseif programMode:lower() == "convert" then
             print(string.format("You only have %d %s drones. Would you like to proceed anyway? (This could crash the program) Y/N", beeCount[targetBee].Drone, targetBee))
             local ans = io.read()
             if ans ~= nil and ans:upper() == "Y" then
-                util.convertPrincess(targetBee, sideConfig, 0)
+                util.convertPrincess(targetBee, sideConfig, 0, breeder, acclimatiserConfig)
             end
         else
-            util.convertPrincess(targetBee, sideConfig)
+            util.convertPrincess(targetBee, sideConfig, nil, breeder, acclimatiserConfig)
         end
         if beeCount[targetBee].Drone < config.convertDroneReq * 2 then
             util.populateBee(targetBee, sideConfig, 16)
