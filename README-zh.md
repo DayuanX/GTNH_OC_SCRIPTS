@@ -28,7 +28,7 @@ The breeder of all breeders. Breeds from whatever you have in your bee chest up 
 
 ### BreederTron3000 安装指南：
 在 OC 电脑上运行以下命令：
-```wget https://raw.githubusercontent.com/FrostyFire1/GTNH_OC_SCRIPTS/main/BreederTron3000/setup.lua && setup```
+```wget https://raw.githubusercontent.com/DayuanX/GTNH_OC_SCRIPTS/main/BreederTron3000/setup.lua && setup```
 
 将 4 个箱子、蜂箱紧贴转运器，算上线缆会把转运器的6个面都用完。
 首次启动时，你需要提供所有容器相对于转运器的方向：
@@ -100,7 +100,9 @@ The breeder of all breeders. Breeds from whatever you have in your bee chest up 
 3. 调整器从eio导管的绿色频道接收耗材和蜜蜂
 4. eio导管的红色频道从采掘器后的接口/调整器中抽出调整完的蜜蜂输出到右下方箱子, 右方缓存器的底面安装机械臂把箱子中的蜜蜂抽入缓存器，缓存器的右边安装机械臂把蜜蜂输出到"输出"末影箱的0号格子
 5. "橙色网络-存储总线 -> me接口-绿色网络"用于把破坏掉落的耗材塞回绿色网络
+
 ![image](assets/acclimatiser_conduit.png)
+
 6. 可以通过eio的"限制物品过滤器"维持调整器内有两种耗材各一组；高级物品过滤器中忽略meta、忽略nbt，然后标注任意蜂后、雄蜂、公主蜂各一只即可通配蜜蜂。
 7. 调整器右边是成型面板，标记调整器，调整器被破坏时可以立刻放置。 
 ![image](assets/acclimatiser_setup_redstone.png)
@@ -116,12 +118,16 @@ The breeder of all breeders. Breeds from whatever you have in your bee chest up 
 4. 压印机中的基因模板最好只有品种留空
 
 示例:
+
 ![image](assets/mutatron_front.png)
+
 1. 左边被缓存器挡住的位置是压印机，右边是诱变机
 2. 中间的缓存器上对着压印机贴机械臂，从3号位置抽取，可以直接抽出成品蜜蜂
 3. 上面两个缓存器+机械臂是输入
+
 ![image](assets/mutatron_back.png)
-1. 背面输入所需耗材。
+
+4. 背面输入所需耗材。
 
 #### 蜂箱
 基本逻辑和原来的类似。
@@ -131,10 +137,14 @@ The breeder of all breeders. Breeds from whatever you have in your bee chest up 
 2. 接收到`apiaryBreaker`面的信号时，激活采掘器，破坏蜂箱，弹出公主蜂。然后自动放好蜂箱。
 
 示例:
+
 ![image](assets/apiary_up.png)
+
 1. 蜂箱上面是成型面板，蜂箱被破坏时会立刻再放出来，优先级调高。
 2. 右侧存储面板以低优先级连接"输出末影箱"，破坏时会把蜂后放进去。
+
 ![image](assets/apiary_down.png)
+
 3. 示例中的 `apiaryBreaker` 面是上面，直接控制采掘器。那个无线发射器是给适应性调整器模块用的。
 
 #### 扫描仪
@@ -144,6 +154,7 @@ The breeder of all breeders. Breeds from whatever you have in your bee chest up 
 
 示例:
 ![image](assets/scanner.png)
+
 缓存器的四面贴机械臂分别从一个格子抽取蜜蜂，缓存器将蜜蜂直接输出到扫描仪中, 扫描仪扫完将蜜蜂直接弹出到"输出末影箱"中。
 
 #### 安装指令
